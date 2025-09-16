@@ -112,9 +112,12 @@ class _BaseLanceDatasink(Datasink):
     ):
         super().__init__(*args, **kwargs)
 
+        merged_storage_options = dict()
+        if storage_options:
+            merged_storage_options.update(storage_options)
+
         # Handle namespace-based table writing
         if namespace is not None and table_id is not None:
-            self.namespace = namespace
             self.table_id = table_id
 
             if mode == "append":
@@ -124,19 +127,44 @@ class _BaseLanceDatasink(Datasink):
                 describe_request = DescribeTableRequest(id=table_id)
                 describe_response = namespace.describe_table(describe_request)
                 self.uri = describe_response.location
+                if describe_response.storage_options:
+                    merged_storage_options.update(describe_response.storage_options)
+            elif mode == "overwrite":
+                # For overwrite mode, try to get existing table, fallback to create
+                from lance_namespace import (
+                    CreateEmptyTableRequest,
+                    DescribeTableRequest,
+                )
+
+                try:
+                    describe_request = DescribeTableRequest(id=table_id)
+                    describe_response = namespace.describe_table(describe_request)
+                    self.uri = describe_response.location
+                    if describe_response.storage_options:
+                        merged_storage_options.update(describe_response.storage_options)
+                except Exception:
+                    create_request = CreateEmptyTableRequest(id=table_id)
+                    create_response = namespace.create_empty_table(create_request)
+                    self.uri = create_response.location
+                    if create_response.storage_options:
+                        merged_storage_options.update(create_response.storage_options)
             else:
-                # For create/overwrite modes, we'll determine URI based on namespace implementation
-                # For now, we'll let the namespace handle the URI generation after write
-                self.uri = None  # Will be set during write process
+                # create mode, create an empty table
+                from lance_namespace import CreateEmptyTableRequest
+
+                create_request = CreateEmptyTableRequest(id=table_id)
+                create_response = namespace.create_empty_table(create_request)
+                self.uri = create_response.location
+                if create_response.storage_options:
+                    merged_storage_options.update(create_response.storage_options)
         else:
-            self.namespace = None
             self.table_id = None
             self.uri = uri
 
         self.schema = schema
         self.mode = mode
         self.read_version: Optional[int] = None
-        self.storage_options = storage_options
+        self.storage_options = merged_storage_options
 
     @property
     def supports_distributed_writes(self) -> bool:
@@ -202,36 +230,6 @@ class _BaseLanceDatasink(Datasink):
                 op,
                 read_version=self.read_version,
                 storage_options=self.storage_options,
-            )
-
-            # Register table with namespace if using namespace-based writing
-            if (
-                self.namespace is not None
-                and self.table_id is not None
-                and self.mode in {"create", "overwrite"}
-            ):
-                self._register_table_with_namespace()
-
-    def _register_table_with_namespace(self):
-        """Register the table with the namespace after successful write."""
-        try:
-            from lance_namespace import RegisterTableRequest
-
-            # Map write mode to register mode
-            register_mode = "CREATE" if self.mode == "create" else "OVERWRITE"
-
-            register_request = RegisterTableRequest(
-                id=self.table_id, location=self.uri, mode=register_mode
-            )
-
-            self.namespace.register_table(register_request)
-        except Exception as e:
-            import warnings
-
-            warnings.warn(
-                f"Failed to register table {self.table_id} with namespace: {e}",
-                RuntimeWarning,
-                stacklevel=3,
             )
 
 
